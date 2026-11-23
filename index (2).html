@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://huggingface.co" crossorigin>
+<title>تفريغ الصوت - Whisper</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#14171c;--mu:#6b7280;--bd:#e2e5ea;--ac:#2563eb;--ts:#0f766e;--hl:#dbeafe}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#181c22;--tx:#e8eaee;--mu:#98a0ad;--bd:#2a2f38;--ac:#5b8def;--ts:#5eead4;--hl:#1e2a44}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;font-size:14px;display:flex;justify-content:center}
+.app{width:100%;max-width:820px;height:100%;display:flex;flex-direction:column;gap:8px;padding:10px}
+.bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:8px}
+select,button,.file{font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:6px 10px;cursor:pointer}
+.file input{display:none}
+button.main{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.fn{color:var(--mu);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mu);min-height:18px}
+.pb{flex:1;height:5px;background:var(--bd);border-radius:3px;overflow:hidden}
+.pb i{display:block;height:100%;width:0;background:var(--ac);transition:width .2s}
+audio{width:100%;height:34px}
+.list{flex:1;min-height:0;overflow-y:auto;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:6px}
+.row{content-visibility:auto;contain-intrinsic-size:auto 48px;display:flex;gap:10px;padding:6px 8px;border-bottom:1px solid var(--bd);cursor:pointer;border-radius:6px}
+.row.act{background:var(--hl)}
+.t{direction:ltr;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;color:var(--ts);white-space:nowrap;line-height:1.8;flex:none}
+.x{flex:1;line-height:1.8;font-size:15px}
+.w{display:inline-block;margin-inline-end:6px}
+.w small{display:none;direction:ltr;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:9.5px;color:var(--mu);margin-inline-start:2px}
+.showw .w small{display:inline}
+.empty{color:var(--mu);text-align:center;padding:24px 8px}
+.foot{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.foot label{color:var(--mu);font-size:12px;display:flex;gap:4px;align-items:center}
+.err{color:#dc2626;font-size:12px}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="bar">
+    <label class="file">اختر ملف صوت<input type="file" id="f" accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.flac,.mp4"></label>
+    <span class="fn" id="fn">لم يتم اختيار ملف</span>
+    <select id="model">
+      <option value="onnx-community/whisper-tiny_timestamped">tiny - سريع</option>
+      <option value="onnx-community/whisper-base_timestamped" selected>base - متوازن</option>
+      <option value="onnx-community/whisper-small_timestamped">small - أدق وأبطأ</option>
+    </select>
+    <select id="lang">
+      <option value="">تحديد اللغة تلقائيا</option>
+      <option value="arabic">العربية</option>
+      <option value="english">English</option>
+      <option value="spanish">Español</option>
+    </select>
+    <button class="main" id="go" disabled>ابدأ التفريغ</button>
+  </div>
+  <div class="st"><span id="msg">جاهز</span><div class="pb"><i id="bar"></i></div></div>
+  <div class="err" id="err"></div>
+  <audio id="au" controls hidden></audio>
+  <div class="list" id="list"><div class="empty">ارفع ملف mp3 أو wav وابدأ التفريغ. أول مرة بينزل النموذج مرة واحدة وبعدها بيتخزن في المتصفح.</div></div>
+  <div class="foot">
+    <button id="cTxt">نسخ نص</button>
+    <button id="dSrt">تنزيل SRT</button>
+    <button id="dTxt">تنزيل TXT</button>
+    <button id="dJson">تنزيل JSON</button>
+    <label><input type="checkbox" id="wt"> وقت كل كلمة</label>
+  </div>
+</div>
+<script type="text/js-worker" id="wk">
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
+env.allowLocalModels = false;
+try { const w = env.backends && env.backends.onnx && env.backends.onnx.wasm; if (w) w.numThreads = Math.min(navigator.hardwareConcurrency || 4, 8); } catch (e) {}
+
+const pipes = {};
+const post = m => self.postMessage(m);
+
+function getPipe(model) {
+  if (!pipes[model]) pipes[model] = loadPipe(model).catch(e => { delete pipes[model]; throw e; });
+  return pipes[model];
+}
+
+async function loadPipe(model) {
+  const files = {};
+  let last = -1;
+  const cb = d => {
+    if (d.status === 'progress' && d.total) {
+      files[d.file] = { l: d.loaded, t: d.total };
+      let l = 0, t = 0;
+      for (const k in files) { l += files[k].l; t += files[k].t; }
+      const pct = Math.round(l / t * 100);
+      if (pct === last) return;
+      last = pct;
+      post({ type: 'dl', pct, mb: (t / 1048576).toFixed(0) });
+    }
+  };
+  let gpuOk = false;
+  try { if (navigator.gpu) gpuOk = !!(await navigator.gpu.requestAdapter()); } catch (e) { gpuOk = false; }
+
+  let p = null, dev = 'CPU';
+  if (gpuOk) {
+    try {
+      p = await pipeline('automatic-speech-recognition', model, { progress_callback: cb, device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } });
+      dev = 'WebGPU';
+    } catch (e) { p = null; }
+  }
+  if (!p) {
+    try {
+      p = await pipeline('automatic-speech-recognition', model, { progress_callback: cb, device: 'wasm', dtype: 'q8' });
+    } catch (e) {
+      p = await pipeline('automatic-speech-recognition', model, { progress_callback: cb, device: 'wasm' });
+    }
+  }
+  p._dev = dev;
+  if (dev === 'WebGPU') {
+    try {
+      post({ type: 'status', text: 'تجهيز النموذج...', pct: 100 });
+      await p(new Float32Array(16000), { return_timestamps: 'word', language: 'english', task: 'transcribe' });
+    } catch (e) {}
+  }
+  return p;
+}
+
+self.onmessage = async e => {
+  const m = e.data;
+  try {
+    if (m.type === 'load') {
+      const p = await getPipe(m.model);
+      post({ type: 'ready', id: m.id, dev: p._dev });
+    } else if (m.type === 'run') {
+      const p = await getPipe(m.model);
+      post({ type: 'run-start', dev: p._dev });
+      const total = Math.max(1, Math.ceil((m.dur - 30) / 20) + 1);
+      let n = 0;
+      const chunk_callback = () => { n++; post({ type: 'prog', pct: Math.min(99, Math.round(n / total * 100)) }); };
+      const base = { chunk_length_s: 30, stride_length_s: 5, language: m.lang, task: 'transcribe', chunk_callback };
+      let res;
+      try {
+        const out = await p(m.audio, { ...base, return_timestamps: 'word' });
+        res = { mode: 'word', chunks: out.chunks.map(c => ({ text: c.text, timestamp: [c.timestamp[0], c.timestamp[1]] })) };
+      } catch (err) {
+        const out = await p(m.audio, { ...base, return_timestamps: true });
+        res = { mode: 'seg', chunks: out.chunks.map(c => ({ text: c.text, timestamp: [c.timestamp[0], c.timestamp[1]] })) };
+      }
+      post({ type: 'done', id: m.id, res });
+    }
+  } catch (err) {
+    post({ type: 'error', id: m.id, error: (err && err.message) || String(err) });
+  }
+};
+</script>
+<script type="module">
+const $ = id => document.getElementById(id);
+let file = null, groups = [], words = [], rows = [], actIdx = -1, decoded = null, busy = false, wake = null, dur = 0, curDev = '';
+
+const p2 = (n, l = 2) => String(n).padStart(l, '0');
+function fmt(sec, sep = '.') {
+  const ms = Math.round(sec * 1000);
+  return p2(Math.floor(ms / 3600000)) + ':' + p2(Math.floor(ms % 3600000 / 60000)) + ':' + p2(Math.floor(ms % 60000 / 1000)) + sep + p2(ms % 1000, 3);
+}
+const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const setMsg = (t, pct) => { $('msg').textContent = t; if (pct != null) $('bar').style.width = pct + '%'; };
+
+/* ---------- العامل (Worker): كل الشغل التقيل بره الصفحة فمفيش تعليق ---------- */
+const worker = new Worker(URL.createObjectURL(new Blob([$('wk').textContent], { type: 'text/javascript' })), { type: 'module' });
+let reqId = 0;
+const pend = {};
+worker.onmessage = e => {
+  const m = e.data;
+  if (m.type === 'dl') setMsg('تنزيل النموذج ' + m.pct + '%  (' + m.mb + ' MB)', m.pct);
+  else if (m.type === 'status') setMsg(m.text, m.pct);
+  else if (m.type === 'run-start') { curDev = m.dev; setMsg('جاري التفريغ (' + curDev + ') - مدة الملف ' + fmt(dur) + ' - 0%', 0); }
+  else if (m.type === 'prog') setMsg('جاري التفريغ (' + curDev + ') - مدة الملف ' + fmt(dur) + ' - ' + m.pct + '%', m.pct);
+  else if (m.id && pend[m.id]) {
+    const p = pend[m.id]; delete pend[m.id];
+    m.type === 'error' ? p.rej(new Error(m.error)) : p.res(m);
+  }
+};
+worker.onerror = e => {
+  const err = new Error(e.message || 'تعذر تشغيل العامل الخلفي');
+  for (const k in pend) { pend[k].rej(err); delete pend[k]; }
+};
+function ask(msg, transfer) {
+  return new Promise((res, rej) => {
+    const id = ++reqId;
+    pend[id] = { res, rej };
+    worker.postMessage({ ...msg, id }, transfer || []);
+  });
+}
+const loads = {};
+function ensure(model) {
+  if (!loads[model]) loads[model] = ask({ type: 'load', model }).catch(e => { delete loads[model]; throw e; });
+  return loads[model];
+}
+
+/* ---------- اختيار الملف: فك الترميز + تحميل النموذج بالتوازي ---------- */
+$('f').onchange = e => {
+  file = e.target.files[0];
+  if (!file) return;
+  $('fn').textContent = file.name;
+  $('go').disabled = false;
+  const au = $('au');
+  au.src = URL.createObjectURL(file);
+  au.hidden = false;
+  decoded = decode(file);
+  decoded.catch(() => {});
+  preload();
+};
+$('model').onchange = preload;
+
+function preload() {
+  if (!file || busy) return;
+  ensure($('model').value).then(() => { if (!busy) setMsg('النموذج جاهز', 100); }).catch(() => { if (!busy) setMsg('جاهز', 0); });
+}
+
+/* ---------- فك ترميز الصوت (على دفعات عشان الصفحة متتجمدش) ---------- */
+async function decode(f) {
+  const buf = await f.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const ab = await ctx.decodeAudioData(buf);
+  ctx.close();
+  const n = ab.length;
+  if (ab.numberOfChannels === 1) return ab.getChannelData(0).slice();
+  const a = ab.getChannelData(0), b = ab.getChannelData(1), data = new Float32Array(n);
+  const step = 1 << 20;
+  for (let s = 0; s < n; s += step) {
+    const e = Math.min(n, s + step);
+    for (let i = s; i < e; i++) data[i] = (a[i] + b[i]) / 2;
+    await new Promise(r => setTimeout(r));
+  }
+  return data;
+}
+
+function group(ws) {
+  const out = []; let cur = null;
+  for (const w of ws) {
+    const gap = cur ? w.s - cur.e : 0;
+    if (!cur || gap > 0.8 || (w.e - cur.s) > 10 || /[.!?؟…]$/.test(cur.words[cur.words.length - 1].w)) {
+      cur = { s: w.s, e: w.e, words: [] };
+      out.push(cur);
+    }
+    cur.words.push(w); cur.e = w.e;
+  }
+  return out;
+}
+
+/* ---------- كاش النتيجة ---------- */
+const cacheKey = () => ['tx', file.name, file.size, file.lastModified, $('model').value, $('lang').value || 'auto'].join('|');
+function cacheGet(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function cacheSet(k, g) { try { const s = JSON.stringify(g); if (s.length < 2e6) localStorage.setItem(k, s); } catch (e) {} }
+
+/* ---------- التفريغ ---------- */
+$('go').onclick = async () => {
+  if (!file) return;
+  $('err').textContent = '';
+  $('go').disabled = true;
+  busy = true;
+  groups = []; words = []; render();
+  const t0 = performance.now();
+  const key = cacheKey();
+  const model = $('model').value;
+  try {
+    try { if (navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+
+    const hit = cacheGet(key);
+    if (hit && hit.length) {
+      groups = hit; render();
+      setMsg('تم من الذاكرة المؤقتة - ' + groups.length + ' جملة', 100);
+      return;
+    }
+
+    setMsg('جاري التحضير...', 100);
+    ensure(model).catch(() => {});
+    const audio = await (decoded || decode(file));
+    decoded = null;                       // الـ buffer هيتنقل للعامل، فلو أعدت التفريغ بيتفك ترميزه تاني
+    dur = audio.length / 16000;
+    const lang = $('lang').value || undefined;
+    const r = (await ask({ type: 'run', model, audio, lang, dur }, [audio.buffer])).res;
+
+    if (r.mode === 'word') {
+      words = r.chunks.map(c => ({ w: c.text.trim(), s: c.timestamp[0], e: c.timestamp[1] ?? c.timestamp[0] })).filter(x => x.w);
+      groups = group(words);
+    } else {
+      groups = r.chunks.map(c => {
+        const s = c.timestamp[0], e = c.timestamp[1] ?? dur;
+        return { s, e, words: [{ w: c.text.trim(), s, e }] };
+      });
+    }
+    render();
+    cacheSet(key, groups);
+    setMsg('تم في ' + ((performance.now() - t0) / 1000).toFixed(1) + ' ثانية - ' + groups.length + ' جملة', 100);
+  } catch (e) {
+    $('err').textContent = 'خطأ: ' + (e.message || e);
+    setMsg('فشل', 0);
+  } finally {
+    try { if (wake) wake.release(); } catch (e) {}
+    wake = null;
+    busy = false;
+    $('go').disabled = false;
+  }
+};
+
+/* ---------- العرض ---------- */
+function render() {
+  const l = $('list');
+  l.innerHTML = groups.length ? groups.map((g, i) =>
+    '<div class="row" data-i="' + i + '"><div class="t">' + fmt(g.s) + '<br>' + fmt(g.e) + '</div><div class="x" dir="auto">' +
+    g.words.map(w => '<span class="w">' + esc(w.w) + '<small>' + fmt(w.s) + '</small></span>').join('') + '</div></div>').join('')
+    : '<div class="empty">النتيجة هتظهر هنا</div>';
+  rows = Array.from(l.querySelectorAll('.row'));
+  actIdx = -1;
+}
+
+$('list').onclick = e => {
+  const r = e.target.closest('.row');
+  if (!r) return;
+  const au = $('au');
+  au.currentTime = groups[+r.dataset.i].s;
+  au.play();
+};
+
+function actAt(t) {
+  let lo = 0, hi = groups.length - 1, r = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (groups[m].s <= t) { r = m; lo = m + 1; } else hi = m - 1;
+  }
+  return r >= 0 && t <= groups[r].e ? r : -1;
+}
+$('au').ontimeupdate = () => {
+  if (!groups.length) return;
+  const i = actAt($('au').currentTime);
+  if (i === actIdx) return;
+  if (rows[actIdx]) rows[actIdx].classList.remove('act');
+  actIdx = i;
+  if (rows[i]) { rows[i].classList.add('act'); rows[i].scrollIntoView({ block: 'nearest' }); }
+};
+$('wt').onchange = e => $('app').classList.toggle('showw', e.target.checked);
+
+/* ---------- التصدير ---------- */
+const text = () => groups.map(g => '[' + fmt(g.s) + ' --> ' + fmt(g.e) + '] ' + g.words.map(w => w.w).join(' ')).join('\n');
+const srt = () => groups.map((g, i) => (i + 1) + '\n' + fmt(g.s, ',') + ' --> ' + fmt(g.e, ',') + '\n' + g.words.map(w => w.w).join(' ') + '\n').join('\n');
+const json = () => JSON.stringify(groups.map(g => ({ start_ms: Math.round(g.s * 1000), end_ms: Math.round(g.e * 1000), text: g.words.map(w => w.w).join(' '), words: g.words.map(w => ({ word: w.w, start_ms: Math.round(w.s * 1000), end_ms: Math.round(w.e * 1000) })) })), null, 2);
+function dl(name, str) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([str], { type: 'text/plain;charset=utf-8' }));
+  a.download = name; a.click();
+}
+$('cTxt').onclick = () => navigator.clipboard.writeText(text());
+$('dSrt').onclick = () => dl('transcript.srt', srt());
+$('dTxt').onclick = () => dl('transcript.txt', text());
+$('dJson').onclick = () => dl('transcript.json', json());
+</script>
+</body>
+</html>
