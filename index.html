@@ -160,8 +160,6 @@ function fmt(sec, sep = '.') {
 }
 const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 const setMsg = (t, pct) => { $('msg').textContent = t; if (pct != null) $('bar').style.width = pct + '%'; };
-
-/* ---------- العامل (Worker): كل الشغل التقيل بره الصفحة فمفيش تعليق ---------- */
 const worker = new Worker(URL.createObjectURL(new Blob([$('wk').textContent], { type: 'text/javascript' })), { type: 'module' });
 let reqId = 0;
 const pend = {};
@@ -212,8 +210,6 @@ function preload() {
   if (!file || busy) return;
   ensure($('model').value).then(() => { if (!busy) setMsg('النموذج جاهز', 100); }).catch(() => { if (!busy) setMsg('جاهز', 0); });
 }
-
-/* ---------- فك ترميز الصوت (على دفعات عشان الصفحة متتجمدش) ---------- */
 async function decode(f) {
   const buf = await f.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -243,13 +239,9 @@ function group(ws) {
   }
   return out;
 }
-
-/* ---------- كاش النتيجة ---------- */
 const cacheKey = () => ['tx', file.name, file.size, file.lastModified, $('model').value, $('lang').value || 'auto'].join('|');
 function cacheGet(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function cacheSet(k, g) { try { const s = JSON.stringify(g); if (s.length < 2e6) localStorage.setItem(k, s); } catch (e) {} }
-
-/* ---------- التفريغ ---------- */
 $('go').onclick = async () => {
   if (!file) return;
   $('err').textContent = '';
@@ -272,7 +264,7 @@ $('go').onclick = async () => {
     setMsg('جاري التحضير...', 100);
     ensure(model).catch(() => {});
     const audio = await (decoded || decode(file));
-    decoded = null;                       // الـ buffer هيتنقل للعامل، فلو أعدت التفريغ بيتفك ترميزه تاني
+    decoded = null;
     dur = audio.length / 16000;
     const lang = $('lang').value || undefined;
     const r = (await ask({ type: 'run', model, audio, lang, dur }, [audio.buffer])).res;
@@ -299,8 +291,6 @@ $('go').onclick = async () => {
     $('go').disabled = false;
   }
 };
-
-/* ---------- العرض ---------- */
 function render() {
   const l = $('list');
   l.innerHTML = groups.length ? groups.map((g, i) =>
@@ -336,8 +326,6 @@ $('au').ontimeupdate = () => {
   if (rows[i]) { rows[i].classList.add('act'); rows[i].scrollIntoView({ block: 'nearest' }); }
 };
 $('wt').onchange = e => $('app').classList.toggle('showw', e.target.checked);
-
-/* ---------- التصدير ---------- */
 const text = () => groups.map(g => '[' + fmt(g.s) + ' --> ' + fmt(g.e) + '] ' + g.words.map(w => w.w).join(' ')).join('\n');
 const srt = () => groups.map((g, i) => (i + 1) + '\n' + fmt(g.s, ',') + ' --> ' + fmt(g.e, ',') + '\n' + g.words.map(w => w.w).join(' ') + '\n').join('\n');
 const json = () => JSON.stringify(groups.map(g => ({ start_ms: Math.round(g.s * 1000), end_ms: Math.round(g.e * 1000), text: g.words.map(w => w.w).join(' '), words: g.words.map(w => ({ word: w.w, start_ms: Math.round(w.s * 1000), end_ms: Math.round(w.e * 1000) })) })), null, 2);
